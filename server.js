@@ -24,6 +24,11 @@ if (!db.prepare('SELECT 1 FROM admins').get()) {
     .run(process.env.ADMIN_USER || 'admin', salt, hashPw(process.env.ADMIN_PASS || 'admin12345', salt));
   if (!process.env.ADMIN_PASS) console.warn('ADMIN_PASS berilmagan! Panelda parolni darhol almashtiring.');
 }
+if (process.env.RESET_ADMIN === '1' && process.env.ADMIN_USER && process.env.ADMIN_PASS) {
+  const salt = crypto.randomBytes(16).toString('hex');
+  db.prepare('UPDATE admins SET username=?,salt=?,hash=? WHERE id=1').run(process.env.ADMIN_USER, salt, hashPw(process.env.ADMIN_PASS, salt));
+  console.log('Admin login va parol tiklandi. RESET_ADMIN ni olib tashlang!');
+}
 if (!db.prepare('SELECT 1 FROM categories').get())
   ['Kinolar', 'Seriallar', 'Komediya', 'Jangari', 'Multfilmlar'].forEach(n => db.prepare('INSERT INTO categories(name) VALUES(?)').run(n));
 
