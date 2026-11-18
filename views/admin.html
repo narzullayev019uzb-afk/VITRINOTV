@@ -1,0 +1,161 @@
+<!doctype html>
+<html lang="uz"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><meta name="robots" content="noindex"><title>Panel</title>
+<style>
+:root{--g:#39ff14;--bg:#070d09;--c:#0f1a13;--b:#1e3326;--t:#e8fff0;--m:#7fa38b;--r:#ff4d5e}
+*{box-sizing:border-box}body{margin:0;background:var(--bg);color:var(--t);font:14px system-ui}
+#login{display:grid;place-items:center;height:100vh}
+.box{background:var(--c);border:1px solid var(--b);border-radius:16px;padding:24px;width:320px}
+input,select,textarea{width:100%;padding:10px 12px;margin:5px 0;background:#08120c;border:1px solid var(--b);border-radius:10px;color:var(--t);font:inherit}
+button{padding:9px 14px;border:0;border-radius:10px;background:var(--g);color:#031a08;font-weight:700;cursor:pointer}
+button.d{background:var(--r);color:#fff}button.s{background:#1e3326;color:var(--t)}
+#app{display:none;min-height:100vh}
+aside{position:fixed;left:0;top:0;bottom:0;width:210px;background:var(--c);border-right:1px solid var(--b);padding:14px;overflow:auto}
+aside h3{color:var(--g);margin:4px 0 14px}
+aside a{display:block;padding:10px;border-radius:10px;color:var(--m);cursor:pointer;margin-bottom:2px}
+aside a.on,aside a:hover{background:#15301f;color:var(--t)}
+main{margin-left:210px;padding:20px;max-width:1000px}
+.cards{display:grid;grid-template-columns:repeat(auto-fit,minmax(150px,1fr));gap:12px}
+.st{background:var(--c);border:1px solid var(--b);border-radius:14px;padding:16px}.st b{display:block;font-size:26px;color:var(--g)}
+.panel{background:var(--c);border:1px solid var(--b);border-radius:14px;padding:16px;margin-bottom:16px}
+table{width:100%;border-collapse:collapse}td,th{padding:8px;border-bottom:1px solid var(--b);text-align:left;vertical-align:middle}
+img.t{width:40px;height:56px;object-fit:cover;border-radius:6px}
+.row{display:grid;grid-template-columns:1fr 1fr;gap:10px}
+#toast{position:fixed;bottom:20px;right:20px;background:var(--g);color:#031a08;padding:12px 18px;border-radius:12px;font-weight:700;display:none;z-index:9}
+.bar{height:8px;background:#15301f;border-radius:9px;overflow:hidden;margin-top:8px}.bar i{display:block;height:100%;width:0;background:var(--g)}
+@media(max-width:760px){aside{position:static;width:auto;display:flex;flex-wrap:wrap;gap:4px}main{margin:0}.row{grid-template-columns:1fr}}
+</style></head><body>
+<div id="login"><div class="box"><h3 style="margin-top:0">🔐 Super admin</h3>
+<input id="lu" placeholder="Login" autocomplete="username"><input id="lp" type="password" placeholder="Parol" autocomplete="current-password" onkeydown="if(event.key==='Enter')doLogin()">
+<button style="width:100%;margin-top:8px" onclick="doLogin()">Kirish</button></div></div>
+<div id="app"><aside><h3>VITRINO TV</h3><div id="menu"></div></aside><main id="main"></main></div>
+<div id="toast"></div>
+<script>
+const B = location.pathname.replace(/\/$/, '');
+const $ = s => document.querySelector(s);
+const esc = s => String(s ?? '').replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
+function toast(t) { const e = $('#toast'); e.textContent = t; e.style.display = 'block'; clearTimeout(toast.t); toast.t = setTimeout(() => e.style.display = 'none', 3000); }
+async function req(m, p, body) {
+  const o = { method: m, headers: {} };
+  if (body instanceof FormData) o.body = body; else if (body) { o.headers['content-type'] = 'application/json'; o.body = JSON.stringify(body); }
+  const r = await fetch(B + '/api' + p, o);
+  if (r.status === 401 && p !== '/login') { showLogin(); throw 0; }
+  const j = await r.json().catch(() => ({}));
+  if (!r.ok) { toast(j.error || 'Xato'); throw j; }
+  return j;
+}
+function upload(p, fd, cb) {
+  return new Promise((ok, no) => {
+    const x = new XMLHttpRequest(); x.open('POST', B + '/api' + p);
+    x.upload.onprogress = e => cb && cb(Math.round(e.loaded / e.total * 100));
+    x.onload = () => x.status < 300 ? ok(JSON.parse(x.responseText)) : no(x.responseText);
+    x.onerror = no; x.send(fd);
+  });
+}
+function showLogin() { $('#login').style.display = 'grid'; $('#app').style.display = 'none'; }
+async function doLogin() { try { await req('POST', '/login', { username: $('#lu').value, password: $('#lp').value }); start(); } catch (e) {} }
+const names = { dash: '📊 Statistika', movies: '🎬 Kinolar', cats: '🗂 Kategoriyalar', users: '👥 Foydalanuvchilar', pays: "💳 To'lovlar", subs: '📢 Majburiy obuna', banners: '🖼 Reklama', bots: '🤖 Botlar', acc: '🔐 Hisob' };
+function go(k) { document.querySelectorAll('aside a').forEach(a => a.classList.toggle('on', a.dataset.k === k)); tabs[k](); }
+async function start() {
+  try { await req('GET', '/stats'); } catch (e) { return showLogin(); }
+  $('#login').style.display = 'none'; $('#app').style.display = 'block';
+  $('#menu').innerHTML = Object.entries(names).map(([k, v]) => `<a data-k="${k}" onclick="go('${k}')">${v}</a>`).join('');
+  go('dash');
+}
+const out = h => $('#main').innerHTML = h;
+
+const tabs = {
+  async dash() {
+    const s = await req('GET', '/stats');
+    out(`<h2>📊 Statistika</h2><div class="cards">
+    <div class="st">Foydalanuvchilar<b>${s.users}</b></div><div class="st">Online (5 daq)<b>${s.online}</b></div><div class="st">Hozir ochiq<b>${s.live}</b></div>
+    <div class="st">Bloklangan<b>${s.blocked}</b></div><div class="st">Kinolar<b>${s.movies}</b></div><div class="st">Ko'rishlar<b>${s.views}</b></div><div class="st">Kutilayotgan to'lov<b>${s.pending}</b></div></div>`);
+  },
+  async movies() {
+    const [cats, list] = await Promise.all([req('GET', '/categories'), req('GET', '/movies')]);
+    out(`<h2>🎬 Kinolar</h2><div class="panel"><h3 style="margin-top:0">Yangi kino / serial qo'shish</h3>
+    <div class="row"><input id="mt" placeholder="Nomi"><input id="my" type="number" placeholder="Yili (2024)"></div>
+    <div class="row"><select id="mc"><option value="">Kategoriya</option>${cats.map(c => `<option value="${c.id}">${esc(c.name)}</option>`).join('')}</select>
+    <select id="mtype"><option value="movie">Kino</option><option value="series">Serial</option></select></div>
+    <div class="row"><input id="mp" type="number" placeholder="Narxi (0 = bepul)" value="0"><input id="mn" type="number" placeholder="Qism raqami (serial uchun)" value="1"></div>
+    <textarea id="md" rows="3" placeholder="Tavsif"></textarea>
+    <label><input type="checkbox" id="mdl" checked style="width:auto"> Foydalanuvchi yuklab olishi mumkin</label>
+    <p>🖼 Poster: <input id="mpo" type="file" accept="image/*"></p><p>🎞 Video: <input id="mv" type="file" accept="video/*"></p>
+    <button id="msave" onclick="saveMovie()">Saqlash</button><div class="bar"><i id="mbar"></i></div></div>
+    <div class="panel"><table><tr><th></th><th>Nomi</th><th>Narx</th><th>Qism</th><th>Ko'rish</th><th></th></tr>
+    ${list.map(m => `<tr><td>${m.poster ? `<img class="t" src="/files/${esc(m.poster)}">` : ''}</td><td>${esc(m.title)}<br><small>${m.year || ''} ${esc(m.cat || '')} ${m.type === 'series' ? '(serial)' : ''}</small></td><td>${m.price ? m.price : 'bepul'}</td><td>${m.eps}</td><td>${m.views}</td>
+    <td><button class="s" onclick="addEp(${m.id})">+qism</button> <button class="s" onclick="editPrice(${m.id},${m.price})">narx</button> <button class="d" onclick="del('/movies/${m.id}','movies')">✕</button></td></tr>`).join('')}</table></div>`);
+  },
+  async cats() {
+    const l = await req('GET', '/categories');
+    out(`<h2>🗂 Kategoriyalar</h2><div class="panel"><input id="cn" placeholder="Masalan: Komediya"><button onclick="act('POST','/categories',{name:$('#cn').value},'cats')">Qo'shish</button></div>
+    <div class="panel"><table>${l.map(c => `<tr><td>${esc(c.name)}</td><td><button class="d" onclick="del('/categories/${c.id}','cats')">✕</button></td></tr>`).join('')}</table></div>`);
+  },
+  async users(q = '') {
+    const l = await req('GET', '/users?q=' + encodeURIComponent(q));
+    out(`<h2>👥 Foydalanuvchilar (${l.length})</h2><div class="panel"><input id="uq" placeholder="Qidirish: ism, @username, ID" value="${esc(q)}" onkeydown="if(event.key==='Enter')tabs.users(this.value)">
+    <table><tr><th>ID</th><th>Ism</th><th>Username</th><th>Qo'shilgan</th><th></th></tr>${l.map(u => `<tr><td>${u.tg_id}</td><td>${esc(u.name)}</td><td>${u.username ? '@' + esc(u.username) : ''}</td><td>${new Date(u.created_at * 1000).toLocaleDateString()}</td>
+    <td><button class="${u.blocked ? 's' : 'd'}" onclick="block(${u.tg_id},${u.blocked ? 0 : 1})">${u.blocked ? 'Blokdan chiqarish' : 'Bloklash'}</button></td></tr>`).join('')}</table></div>`);
+  },
+  async pays() {
+    const [p, pm] = await Promise.all([req('GET', '/purchases'), req('GET', '/paymethods')]);
+    out(`<h2>💳 To'lovlar</h2><div class="panel"><h3 style="margin-top:0">Kutilayotgan cheklar</h3>${p.map(x => `<div style="display:flex;gap:12px;align-items:center;margin:10px 0"><a href="${B}/api/receipt/${x.id}" target="_blank"><img class="t" style="width:70px;height:90px" src="${B}/api/receipt/${x.id}"></a>
+    <div style="flex:1"><b>${esc(x.title)}</b><br>${esc(x.name)} ${x.username ? '@' + esc(x.username) : ''} (${x.user_id})</div>
+    <button onclick="act('POST','/purchases/${x.id}/approve',null,'pays')">✅ Tasdiqlash</button> <button class="d" onclick="act('POST','/purchases/${x.id}/reject',null,'pays')">❌</button></div>`).join('') || '<p>Yo\'q</p>'}</div>
+    <div class="panel"><h3 style="margin-top:0">To'lov usullari (karta)</h3><div class="row"><input id="pn" placeholder="Nomi (Uzcard / Humo)"><input id="pc" placeholder="Karta raqami"></div><div class="row"><input id="ph" placeholder="Egasi"><input id="pt" placeholder="Izoh"></div>
+    <button onclick="act('POST','/paymethods',{name:$('#pn').value,card:$('#pc').value,holder:$('#ph').value,note:$('#pt').value},'pays')">Qo'shish</button>
+    <table>${pm.map(x => `<tr><td>${esc(x.name)}</td><td>${esc(x.card)}</td><td>${esc(x.holder)}</td><td><button class="d" onclick="del('/paymethods/${x.id}','pays')">✕</button></td></tr>`).join('')}</table></div>`);
+  },
+  async subs() {
+    const l = await req('GET', '/channels');
+    out(`<h2>📢 Majburiy obuna</h2><div class="panel"><p style="color:var(--m)">Bot kanal/guruhda <b>admin</b> bo'lishi shart. Chat: @username yoki -100... ID</p>
+    <div class="row"><input id="sc" placeholder="@kanal yoki -1001234567890"><input id="st" placeholder="Ko'rinadigan nomi"></div><input id="sl" placeholder="Havola (https://t.me/... — yopiq kanal uchun shart)">
+    <button onclick="act('POST','/channels',{chat:$('#sc').value,title:$('#st').value,link:$('#sl').value},'subs')">Qo'shish</button>
+    <table>${l.map(c => `<tr><td>${esc(c.title)}</td><td>${esc(c.chat)}</td><td><button class="d" onclick="del('/channels/${c.id}','subs')">✕</button></td></tr>`).join('')}</table></div>`);
+  },
+  async banners() {
+    const l = await req('GET', '/banners');
+    out(`<h2>🖼 Reklama bannerlari</h2><div class="panel"><p>Rasm yoki video: <input id="bf" type="file" accept="image/*,video/*"></p><input id="bl" placeholder="Bosilganda ochiladigan havola (ixtiyoriy)">
+    <button onclick="addBanner()">Yuklash</button></div><div class="panel"><table>${l.map(b => `<tr><td>${b.kind === 'video' ? `<video src="/files/${b.file}" style="width:140px" muted></video>` : `<img src="/files/${b.file}" style="width:140px">`}</td><td>${esc(b.link)}</td>
+    <td><button class="s" onclick="act('POST','/banners/${b.id}/toggle',null,'banners')">${b.active ? 'Yoqilgan' : "O'chirilgan"}</button> <button class="d" onclick="del('/banners/${b.id}','banners')">✕</button></td></tr>`).join('')}</table></div>`);
+  },
+  async bots() {
+    const l = await req('GET', '/bots');
+    out(`<h2>🤖 Botlar</h2><div class="panel"><input id="bt" placeholder="Yangi bot tokeni (BotFather'dan)"><button onclick="act('POST','/bots',{token:$('#bt').value},'bots')">Bot qo'shish</button></div>
+    ${l.map(b => `<div class="panel"><b>@${esc(b.username)}</b> (id ${b.id})<textarea id="bw${b.id}" rows="3">${esc(b.welcome)}</textarea><input id="bb${b.id}" value="${esc(b.button)}">
+    <button onclick="act('PUT','/bots/${b.id}',{welcome:$('#bw${b.id}').value,button:$('#bb${b.id}').value},'bots')">Saqlash</button>
+    <button class="s" onclick="act('PUT','/bots/${b.id}',{active:${b.active ? 0 : 1}},'bots')">${b.active ? "O'chirish" : 'Yoqish'}</button> <button class="d" onclick="del('/bots/${b.id}','bots')">✕</button></div>`).join('')}`);
+  },
+  acc() {
+    out(`<h2>🔐 Hisob</h2><div class="panel" style="max-width:420px"><input id="ac" type="password" placeholder="Joriy parol"><input id="au" placeholder="Yangi login"><input id="ap" type="password" placeholder="Yangi parol (8+ belgi)">
+    <button onclick="chAcc()">O'zgartirish</button></div>`);
+  }
+};
+async function act(m, p, b, k) { try { await req(m, p, b); toast('✅ Bajarildi'); go(k); } catch (e) {} }
+async function del(p, k) { if (confirm("O'chirilsinmi?")) act('DELETE', p, null, k); }
+function block(id, v) { act('POST', `/users/${id}/block`, { blocked: v }, 'users'); }
+async function saveMovie() {
+  const fd = new FormData();
+  [['title', 'mt'], ['year', 'my'], ['category_id', 'mc'], ['type', 'mtype'], ['price', 'mp'], ['number', 'mn'], ['description', 'md']].forEach(([k, i]) => fd.append(k, $('#' + i).value));
+  fd.append('allow_download', $('#mdl').checked ? '1' : '0');
+  if ($('#mpo').files[0]) fd.append('poster', $('#mpo').files[0]);
+  if ($('#mv').files[0]) fd.append('video', $('#mv').files[0]);
+  $('#msave').disabled = true;
+  try { await upload('/movies', fd, p => $('#mbar').style.width = p + '%'); toast('✅ Saqlandi'); go('movies'); } catch (e) { toast('Yuklashda xato'); $('#msave').disabled = false; }
+}
+function addEp(id) {
+  const n = prompt('Qism raqami?'); if (!n) return;
+  const i = document.createElement('input'); i.type = 'file'; i.accept = 'video/*';
+  i.onchange = async () => { const fd = new FormData(); fd.append('number', n); fd.append('video', i.files[0]); toast('Yuklanmoqda...'); try { await upload('/movies/' + id + '/episodes', fd, p => toast('Yuklanmoqda ' + p + '%')); toast("✅ Qism qo'shildi"); go('movies'); } catch (e) { toast('Xato'); } };
+  i.click();
+}
+async function editPrice(id, old) { const v = prompt('Yangi narx (0 = bepul)', old); if (v === null) return; const fd = new FormData(); fd.append('price', v); await fetch(B + '/api/movies/' + id, { method: 'PUT', body: fd }); go('movies'); }
+async function addBanner() {
+  const f = $('#bf').files[0]; if (!f) return toast('Fayl tanlang');
+  const fd = new FormData(); fd.append('file', f); fd.append('link', $('#bl').value);
+  toast('Yuklanmoqda...'); await upload('/banners', fd, p => toast('Yuklanmoqda ' + p + '%')); go('banners');
+}
+async function chAcc() {
+  try { await req('POST', '/account', { current: $('#ac').value, username: $('#au').value, password: $('#ap').value }); toast('✅ Qayta kiring'); setTimeout(showLogin, 800); } catch (e) {}
+}
+start();
+</script></body></html>

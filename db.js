@@ -1,0 +1,20 @@
+const Database = require('better-sqlite3');
+const path = require('path');
+const fs = require('fs');
+const DATA = process.env.DATA_DIR || path.join(__dirname, 'data');
+fs.mkdirSync(path.join(DATA, 'uploads', 'private'), { recursive: true });
+const db = new Database(path.join(DATA, 'app.db'));
+db.pragma('journal_mode = WAL');
+db.exec(`
+CREATE TABLE IF NOT EXISTS users(tg_id INTEGER PRIMARY KEY, name TEXT, username TEXT, blocked INTEGER DEFAULT 0, created_at INTEGER, last_seen INTEGER);
+CREATE TABLE IF NOT EXISTS categories(id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT UNIQUE, sort INTEGER DEFAULT 0);
+CREATE TABLE IF NOT EXISTS movies(id INTEGER PRIMARY KEY AUTOINCREMENT, title TEXT, year INTEGER, category_id INTEGER, type TEXT DEFAULT 'movie', description TEXT, poster TEXT, price INTEGER DEFAULT 0, allow_download INTEGER DEFAULT 1, views INTEGER DEFAULT 0, created_at INTEGER);
+CREATE TABLE IF NOT EXISTS episodes(id INTEGER PRIMARY KEY AUTOINCREMENT, movie_id INTEGER, number INTEGER DEFAULT 1, file TEXT);
+CREATE TABLE IF NOT EXISTS purchases(id INTEGER PRIMARY KEY AUTOINCREMENT, user_id INTEGER, movie_id INTEGER, receipt TEXT, status TEXT DEFAULT 'pending', created_at INTEGER);
+CREATE TABLE IF NOT EXISTS pay_methods(id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT, card TEXT, holder TEXT, note TEXT);
+CREATE TABLE IF NOT EXISTS channels(id INTEGER PRIMARY KEY AUTOINCREMENT, chat TEXT, title TEXT, link TEXT);
+CREATE TABLE IF NOT EXISTS banners(id INTEGER PRIMARY KEY AUTOINCREMENT, file TEXT, kind TEXT, link TEXT, active INTEGER DEFAULT 1);
+CREATE TABLE IF NOT EXISTS bots(id INTEGER PRIMARY KEY AUTOINCREMENT, token TEXT UNIQUE, username TEXT, welcome TEXT, button TEXT, active INTEGER DEFAULT 1);
+CREATE TABLE IF NOT EXISTS admins(id INTEGER PRIMARY KEY, username TEXT, salt TEXT, hash TEXT);
+`);
+module.exports = { db, DATA };
