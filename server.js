@@ -8,6 +8,7 @@ const { spawn } = require('child_process');
 const multer = require('multer');
 const { Bot, InlineKeyboard, webhookCallback } = require('grammy');
 const { db, DATA, getSetting, setSetting } = require('./db');
+const st = require('./storage');
 
 const BASE = (process.env.BASE_URL || '').replace(/\/$/, '');
 const AP = (process.env.ADMIN_PATH || 'panel').replace(/[^\w-]/g, '');
@@ -24,12 +25,47 @@ const UP = path.join(DATA, 'uploads');
 const PRIV = path.join(UP, 'private');
 try { fs.rmSync(path.join(UP, 'tmp'), { recursive: true, force: true }); } catch (e) {}
 const rm = (f, priv) => { if (f) fs.unlink(path.join(priv ? PRIV : UP, path.basename(f)), () => {}); };
+const isS3 = f => String(f || '').startsWith('s3:');
+function rmEp(file) { if (isS3(file)) st.del(file.slice(3)).catch(() => {}); else rm(file, true); }
+async function persistImage(name, type) {
+  if (!name || !st.enabled) return name;
+  try { await st.putFile('img/' + name, path.join(UP, name), type || (/\.png$/i.test(name) ? 'image/png' : 'image/jpeg')); }
+  catch (e) { console.error('S3 rasm xato:', e.message); }
+  return name;
+}
+async function proxyS3(req, res, key, type, cache) {
+  const range = req.headers.range;
+  const r = await st.getObject(key, range);
+  res.status(range && r.ContentRange ? 206 : 200);
+  res.set({ 'Content-Type': r.ContentType || type || 'application/octet-stream', 'Accept-Ranges': 'bytes', 'Cache-Control': cache || 'public, max-age=2592000, immutable' });
+  if (r.ContentLength != null) res.set('Content-Length', String(r.ContentLength));
+  if (r.ContentRange) res.set('Content-Range', r.ContentRange);
+  r.Body.pipe(res);
+}
+let bkT = null, syT = null, bkBusy = false, bkLast = -1;
+async function runBackup(force) {
+  if (!st.enabled || bkBusy) return;
+  const n = db.prepare('SELECT total_changes() n').get().n;
+  if (!force && n === bkLast) return;
+  bkBusy = true;
+  try {
+    const tmp = path.join(DATA, 'backup.tmp');
+    fs.rmSync(tmp, { force: true });
+    await db.backup(tmp);
+    await st.putFile('db/app.db', tmp, 'application/octet-stream');
+    bkLast = n;
+  } catch (e) { console.error('Zaxira xato:', e.message); }
+  bkBusy = false;
+}
+function scheduleBackup() { if (!st.enabled) return; clearTimeout(bkT); bkT = setTimeout(() => runBackup(false), 4000); }
+function scheduleSync() { clearTimeout(syT); syT = setTimeout(() => pushAll('sync', {}), 1200); }
+const SYNC = /\/api\/(categories|banners|episodes|settings|movies)(\/\d+)?(\/toggle)?$/;
 
 function isPersistent() {
   if (!process.env.RENDER) return true;
   try { return fs.statSync(DATA).dev !== fs.statSync('/').dev; } catch (e) { return true; }
 }
-const PERSIST = isPersistent();
+const PERSIST = isPersistent() || st.enabled;
 if (!PERSIST) console.warn("DIQQAT: doimiy disk ulanmagan! Kinolar va sozlamalar qayta ishga tushganda o'chadi.");
 
 // ---------- rasm va video ishlov ----------
@@ -124,7 +160,7 @@ function upsertUser(u) {
     db.prepare('INSERT INTO users(tg_id,name,username,created_at,last_seen) VALUES(?,?,?,?,?)').run(u.id, name, u.username || '', now(), now());
     usr = { tg_id: u.id, blocked: 0, phone: null };
     pushAdmin('user', { name });
-  } else db.prepare('UPDATE users SET last_seen=?,name=?,username=? WHERE tg_id=?').run(now(), name, u.username || '', u.id);
+  } else if (!usr.last_seen || now() - usr.last_seen > 60 || usr.name !== name) db.prepare('UPDATE users SET last_seen=?,name=?,username=? WHERE tg_id=?').run(now(), name, u.username || '', u.id);
   return usr;
 }
 const bots = new Map();
@@ -169,7 +205,10 @@ async function broadcast({ html, photo, movieId }) {
 function announce(id, notify, isNew) {
   const m = db.prepare('SELECT * FROM movies WHERE id=?').get(id);
   if (!m) return;
-  if (isNew) pushAll('new', { id: m.id, title: m.title });
+  if (isNew) {
+    const row = db.prepare(`SELECT ${MCOLS} ${FROMM} WHERE m.id=?`).get(m.id);
+    pushAll('new', row || { id: m.id, title: m.title });
+  }
   if (notify) {
     const html = `🎬 <b>${escHtml(m.title)}</b>${m.year ? ' (' + m.year + ')' : ''}\n\nYangi kino qo'shildi! Hoziroq tomosha qiling 👇`;
     broadcast({ html, photo: m.poster ? `${BASE}/files/${m.poster}` : null, movieId: m.id })
@@ -205,6 +244,21 @@ async function startBot(row) {
     await ctx.reply(r.welcome || 'VITRINO TV ga xush kelibsiz!', { reply_markup: kb, parse_mode: 'HTML' });
   }
   bot.command('start', ctx => gate(ctx, ctx.match));
+  bot.command('app', ctx => gate(ctx, ''));
+  bot.on('inline_query', async ctx => {
+    const q = (ctx.inlineQuery.query || '').trim();
+    const rows = q
+      ? db.prepare(`SELECT ${MCOLS} ${FROMM} WHERE m.title LIKE ? ORDER BY m.views DESC LIMIT 20`).all(`%${q}%`)
+      : db.prepare(`SELECT ${MCOLS} ${FROMM} ORDER BY m.id DESC LIMIT 20`).all();
+    const results = rows.map(m => ({
+      type: 'article', id: String(m.id), title: m.title,
+      description: [m.year, m.cat, m.price ? Number(m.price).toLocaleString('ru') + " so'm" : 'Bepul'].filter(Boolean).join(' • '),
+      thumbnail_url: m.poster ? `${BASE}/files/${m.poster}` : undefined,
+      input_message_content: { message_text: `🎬 <b>${escHtml(m.title)}</b>${m.year ? ' (' + m.year + ')' : ''}\n\nTomosha qiling 👇`, parse_mode: 'HTML' },
+      reply_markup: { inline_keyboard: [[{ text: "▶ Ko'rish", url: `https://t.me/${bot.botInfo.username}?start=m${m.id}` }]] }
+    }));
+    await ctx.answerInlineQuery(results, { cache_time: 20, is_personal: false, button: { text: '🎬 VITRINO TV ni ochish', web_app: { url: `${BASE}/?b=${row.id}` } } });
+  });
   bot.callbackQuery('check', async ctx => { await ctx.answerCallbackQuery(); await gate(ctx, ''); });
   bot.on('message:contact', async ctx => {
     const c = ctx.message.contact;
@@ -221,6 +275,7 @@ async function startBot(row) {
   try {
     await bot.api.setChatMenuButton({ menu_button: { type: 'web_app', text: 'Kinolar', web_app: { url: `${BASE}/?b=${row.id}` } } });
   } catch (e) {}
+  try { await bot.api.setMyCommands([{ command: 'start', description: 'Kinolarni ochish' }, { command: 'app', description: 'Mini ilovani ochish' }]); } catch (e) {}
   bots.set(row.id, bot);
   db.prepare('UPDATE bots SET username=? WHERE id=?').run(bot.botInfo.username, row.id);
 }
@@ -279,7 +334,9 @@ app.get('/api/home', auth, ah(async (req, res) => {
   sql += ' ORDER BY m.id DESC LIMIT 200';
   const out = { missing: [], categories: db.prepare('SELECT * FROM categories ORDER BY sort,id').all(), movies: db.prepare(sql).all(...a) };
   if (!q && !cat) {
-    out.banners = db.prepare('SELECT id,file,kind,link FROM banners WHERE active=1 ORDER BY id DESC').all();
+    out.banners = db.prepare("SELECT id,file,kind,link,place FROM banners WHERE active=1 ORDER BY id DESC").all();
+    if (out.banners.length) db.prepare("UPDATE banners SET views=views+1 WHERE active=1 AND place IN ('top','inline')").run();
+    out.hero = db.prepare(`SELECT ${MCOLS}, m.description ${FROMM} WHERE m.poster IS NOT NULL AND EXISTS (SELECT 1 FROM episodes e WHERE e.movie_id=m.id) ORDER BY m.featured DESC, m.id DESC LIMIT 1`).get() || null;
     out.top = db.prepare(`SELECT ${MCOLS} ${FROMM} ORDER BY m.views DESC, m.id DESC LIMIT 10`).all();
     out.cont = db.prepare(`SELECT ${MCOLS}, p.episode_id, p.pos, p.dur FROM progress p JOIN movies m ON m.id=p.movie_id LEFT JOIN categories c ON c.id=m.category_id WHERE p.user_id=? AND p.dur>0 AND p.pos>20 AND p.pos/p.dur<0.95 ORDER BY p.updated_at DESC LIMIT 12`).all(req.uid);
   }
@@ -290,6 +347,8 @@ app.get('/api/movie/:id', auth, (req, res) => {
   if (!m) return res.sendStatus(404);
   const ok = owned(req.uid, m);
   db.prepare('UPDATE movies SET views=views+1 WHERE id=?').run(m.id);
+  const ad = db.prepare("SELECT id,file,kind,link,place FROM banners WHERE active=1 AND place='detail' ORDER BY RANDOM() LIMIT 1").get() || null;
+  if (ad) db.prepare('UPDATE banners SET views=views+1 WHERE id=?').run(ad.id);
   const prog = {};
   db.prepare('SELECT episode_id,pos,dur FROM progress WHERE user_id=? AND movie_id=?').all(req.uid, m.id).forEach(p => { prog[p.episode_id] = { pos: p.pos, dur: p.dur }; });
   const bot = db.prepare('SELECT username FROM bots WHERE id=?').get(+req.headers['x-bot'] || 1);
@@ -301,6 +360,7 @@ app.get('/api/movie/:id', auth, (req, res) => {
     related: m.category_id ? db.prepare(`SELECT ${MCOLS} ${FROMM} WHERE m.category_id=? AND m.id<>? ORDER BY m.views DESC LIMIT 10`).all(m.category_id, m.id) : [],
     fav: !!db.prepare('SELECT 1 FROM favs WHERE user_id=? AND movie_id=?').get(req.uid, m.id),
     bot: bot ? bot.username : '',
+    ad,
     pay: ok ? [] : db.prepare('SELECT * FROM pay_methods').all()
   });
 });
@@ -309,6 +369,10 @@ app.post('/api/fav/:id', auth, (req, res) => {
   if (has) db.prepare('DELETE FROM favs WHERE user_id=? AND movie_id=?').run(req.uid, req.params.id);
   else db.prepare('INSERT INTO favs(user_id,movie_id) VALUES(?,?)').run(req.uid, req.params.id);
   res.json({ fav: !has });
+});
+app.post('/api/banner/:id/click', auth, (req, res) => {
+  db.prepare('UPDATE banners SET clicks=clicks+1 WHERE id=?').run(req.params.id);
+  res.json({ ok: 1 });
 });
 app.get('/api/favs', auth, (req, res) => {
   res.json(db.prepare(`SELECT ${MCOLS} FROM favs f JOIN movies m ON m.id=f.movie_id LEFT JOIN categories c ON c.id=m.category_id WHERE f.user_id=? ORDER BY m.id DESC`).all(req.uid));
@@ -323,11 +387,11 @@ app.get('/api/profile', auth, (req, res) => {
 });
 app.get('/api/downloads', auth, (req, res) => {
   const list = db.prepare(`SELECT ${MCOLS} ${FROMM} WHERE m.allow_download=1 AND (m.price=0 OR EXISTS (SELECT 1 FROM purchases p WHERE p.user_id=? AND p.movie_id=m.id AND p.status='approved')) ORDER BY m.id DESC LIMIT 100`).all(req.uid);
-  const eps = db.prepare('SELECT id,number,file FROM episodes WHERE movie_id=? ORDER BY number');
+  const eps = db.prepare('SELECT id,number,file,size FROM episodes WHERE movie_id=? ORDER BY number');
   list.forEach(m => {
     m.eps = eps.all(m.id).map(e => {
-      let size = 0;
-      try { size = fs.statSync(path.join(PRIV, path.basename(e.file))).size; } catch (x) {}
+      let size = e.size || 0;
+      if (!size && !isS3(e.file)) { try { size = fs.statSync(path.join(PRIV, path.basename(e.file))).size; } catch (x) {} }
       return { id: e.id, number: e.number, size };
     });
   });
@@ -341,16 +405,27 @@ app.post('/api/progress', auth, (req, res) => {
     .run(req.uid, +ep, e.movie_id, +pos || 0, +dur || 0, now());
   res.json({ ok: 1 });
 });
-app.get('/api/play/:id', auth, (req, res) => {
+app.get('/api/play/:id', auth, ah(async (req, res) => {
   const e = db.prepare('SELECT e.*,m.price,m.allow_download,m.title FROM episodes e JOIN movies m ON m.id=e.movie_id WHERE e.id=?').get(req.params.id);
   if (!e) return res.sendStatus(404);
   if (!owned(req.uid, { id: e.movie_id, price: e.price })) return res.status(402).json({ error: 'pay' });
-  const exp = now() + 6 * 3600;
-  const t = `${req.uid}.${exp}.${hmac(`${e.id}.${req.uid}.${exp}`)}`;
   const next = db.prepare('SELECT id FROM episodes WHERE movie_id=? AND number>? ORDER BY number LIMIT 1').get(e.movie_id, e.number);
   const pr = db.prepare('SELECT pos FROM progress WHERE user_id=? AND episode_id=?').get(req.uid, e.id);
-  res.json({ url: `/stream/${e.id}?t=${t}`, dl: e.allow_download ? `/stream/${e.id}?t=${t}&dl=1` : null, title: e.title, number: e.number, next: next ? next.id : null, pos: pr ? pr.pos : 0 });
-});
+  let url, dl = null;
+  if (isS3(e.file)) {
+    const key = e.file.slice(3);
+    url = await st.signedGet(key);
+    if (e.allow_download) dl = await st.signedGet(key, { filename: `${e.title}-${e.number}${path.extname(key)}`.replace(/[^\w.\-]+/g, '_') });
+  } else {
+    const exp = now() + 6 * 3600;
+    const t = `${req.uid}.${exp}.${hmac(`${e.id}.${req.uid}.${exp}`)}`;
+    url = `/stream/${e.id}?t=${t}`;
+    dl = e.allow_download ? `${url}&dl=1` : null;
+  }
+  const pos = pr ? pr.pos : 0;
+  const introOn = getSetting('intro_on', '1') === '1' && pos < 5 && !req.query.noi && fs.existsSync(path.join(__dirname, 'public', 'intro.mp4'));
+  res.json({ url, dl, title: e.title, number: e.number, next: next ? next.id : null, pos, intro: introOn ? '/intro.mp4' : null });
+}));
 app.get('/stream/:id', (req, res) => {
   const [uid, exp, sig] = String(req.query.t || '').split('.');
   if (!sig || +exp < now() || hmac(`${req.params.id}.${uid}.${exp}`) !== sig) return res.sendStatus(403);
@@ -359,14 +434,18 @@ app.get('/stream/:id', (req, res) => {
   if (req.query.dl) res.attachment(`${e.title}-${e.number}${path.extname(e.file)}`.replace(/[^\w.\-]+/g, '_'));
   res.sendFile(path.join(PRIV, path.basename(e.file)));
 });
-app.post('/api/buy/:id', auth, upReceipt.single('receipt'), (req, res) => {
+app.post('/api/buy/:id', auth, upReceipt.single('receipt'), ah(async (req, res) => {
   const m = db.prepare('SELECT id,title FROM movies WHERE id=?').get(req.params.id);
   if (!m || !req.file) return res.status(400).json({ error: 'Chek rasmi kerak' });
   if (db.prepare("SELECT 1 FROM purchases WHERE user_id=? AND movie_id=? AND status='pending'").get(req.uid, m.id)) return res.status(400).json({ error: 'Allaqachon yuborilgan' });
+  if (st.enabled && req.file.path) {
+    try { await st.putFile('r/' + req.file.filename, req.file.path, req.file.mimetype || 'image/jpeg'); fs.unlink(req.file.path, () => {}); }
+    catch (e) { console.error('S3 chek xato:', e.message); }
+  }
   db.prepare('INSERT INTO purchases(user_id,movie_id,receipt,created_at) VALUES(?,?,?,?)').run(req.uid, m.id, req.file.filename, now());
   pushAdmin('pay', { title: m.title });
   res.json({ ok: 1 });
-});
+}));
 
 // ---------- Admin panel ----------
 const A = express.Router();
@@ -395,13 +474,21 @@ A.use('/api', (req, res, next) => {
   if (m) {
     const [id, exp, sig] = m[1].split('.');
     const a = db.prepare('SELECT id,username,hash,role FROM admins WHERE id=?').get(+id);
-    if (a && +exp > now() && sig === hmac('adm' + a.id + exp + a.hash)) { req.admin = a; return next(); }
+    if (a && +exp > now() && sig === hmac('adm' + a.id + exp + a.hash)) {
+      req.admin = a;
+      if (req.method !== 'GET') res.on('finish', () => {
+        if (res.statusCode >= 300) return;
+        scheduleBackup();
+        if (SYNC.test(String(req.originalUrl).split('?')[0])) scheduleSync();
+      });
+      return next();
+    }
   }
   res.status(401).json({ error: 'auth' });
 });
 const sup = (req, res, next) => (req.admin.role === 'super' ? next() : res.status(403).json({ error: 'Faqat bosh admin uchun' }));
 
-A.get('/api/me', (req, res) => res.json({ username: req.admin.username, role: req.admin.role, persistent: PERSIST }));
+A.get('/api/me', (req, res) => res.json({ username: req.admin.username, role: req.admin.role, persistent: PERSIST, s3: st.enabled }));
 A.get('/api/live', (req, res) => {
   openSse(req, res);
   adminLive.add(res);
@@ -458,9 +545,9 @@ A.delete('/api/admins/:id', sup, (req, res) => {
   res.json({ ok: 1 });
 });
 // sozlamalar
-A.get('/api/settings', sup, (req, res) => res.json({ sub_required: getSetting('sub_required', '0'), phone_required: getSetting('phone_required', '1') }));
+A.get('/api/settings', sup, (req, res) => res.json({ sub_required: getSetting('sub_required', '0'), phone_required: getSetting('phone_required', '1'), intro_on: getSetting('intro_on', '1') }));
 A.post('/api/settings', sup, (req, res) => {
-  ['sub_required', 'phone_required'].forEach(k => { if (req.body[k] !== undefined) setSetting(k, req.body[k] ? '1' : '0'); });
+  ['sub_required', 'phone_required', 'intro_on'].forEach(k => { if (req.body[k] !== undefined) setSetting(k, req.body[k] ? '1' : '0'); });
   subCache.clear();
   res.json({ ok: 1 });
 });
@@ -481,9 +568,9 @@ const mf = upAdmin.fields([{ name: 'poster', maxCount: 1 }, { name: 'video', max
 A.post('/api/movies', mf, ah(async (req, res) => {
   const b = req.body, f = req.files || {};
   if (!b.title) return res.status(400).json({ error: 'Nomi kerak' });
-  const poster = f.poster ? await optimizeImage(f.poster[0].filename, 600) : null;
-  const id = db.prepare('INSERT INTO movies(title,year,category_id,type,description,poster,price,allow_download,created_at) VALUES(?,?,?,?,?,?,?,?,?)')
-    .run(b.title, +b.year || null, +b.category_id || null, b.type === 'series' ? 'series' : 'movie', b.description || '', poster, +b.price || 0, b.allow_download === '0' ? 0 : 1, now()).lastInsertRowid;
+  const poster = f.poster ? await persistImage(await optimizeImage(f.poster[0].filename, 600)) : null;
+  const id = db.prepare('INSERT INTO movies(title,year,category_id,type,description,poster,price,allow_download,created_at,featured) VALUES(?,?,?,?,?,?,?,?,?,?)')
+    .run(b.title, +b.year || null, +b.category_id || null, b.type === 'series' ? 'series' : 'movie', b.description || '', poster, +b.price || 0, b.allow_download === '0' ? 0 : 1, now(), b.featured === '1' ? 1 : 0).lastInsertRowid;
   if (f.video) {
     const e = db.prepare('INSERT INTO episodes(movie_id,number,file) VALUES(?,?,?)').run(id, +b.number || 1, f.video[0].filename);
     burnWatermark(e.lastInsertRowid, f.video[0].filename);
@@ -495,18 +582,18 @@ A.put('/api/movies/:id', upAdmin.fields([{ name: 'poster', maxCount: 1 }]), ah(a
   const b = req.body, m = db.prepare('SELECT * FROM movies WHERE id=?').get(req.params.id);
   if (!m) return res.sendStatus(404);
   let poster = m.poster;
-  if (req.files && req.files.poster) { rm(m.poster); poster = await optimizeImage(req.files.poster[0].filename, 600); }
-  db.prepare('UPDATE movies SET title=?,year=?,category_id=?,description=?,price=?,allow_download=?,poster=? WHERE id=?')
+  if (req.files && req.files.poster) { rm(m.poster); poster = await persistImage(await optimizeImage(req.files.poster[0].filename, 600)); }
+  db.prepare('UPDATE movies SET title=?,year=?,category_id=?,description=?,price=?,allow_download=?,poster=?,featured=? WHERE id=?')
     .run(b.title ?? m.title, +b.year || m.year, b.category_id === undefined ? m.category_id : (+b.category_id || null),
       b.description ?? m.description, b.price === undefined ? m.price : +b.price,
-      b.allow_download === undefined ? m.allow_download : +b.allow_download, poster, m.id);
+      b.allow_download === undefined ? m.allow_download : +b.allow_download, poster, b.featured === undefined ? m.featured : +b.featured, m.id);
   res.json({ ok: 1 });
 }));
 A.delete('/api/movies/:id', (req, res) => {
   const m = db.prepare('SELECT * FROM movies WHERE id=?').get(req.params.id);
   if (!m) return res.sendStatus(404);
   rm(m.poster);
-  db.prepare('SELECT file FROM episodes WHERE movie_id=?').all(m.id).forEach(e => rm(e.file, true));
+  db.prepare('SELECT file FROM episodes WHERE movie_id=?').all(m.id).forEach(e => rmEp(e.file));
   db.prepare('DELETE FROM episodes WHERE movie_id=?').run(m.id);
   db.prepare('DELETE FROM progress WHERE movie_id=?').run(m.id);
   db.prepare('DELETE FROM favs WHERE movie_id=?').run(m.id);
@@ -517,7 +604,7 @@ A.get('/api/movies/:id/episodes', (req, res) => res.json(db.prepare('SELECT id,n
 A.delete('/api/episodes/:id', (req, res) => {
   const e = db.prepare('SELECT * FROM episodes WHERE id=?').get(req.params.id);
   if (!e) return res.sendStatus(404);
-  rm(e.file, true);
+  rmEp(e.file);
   db.prepare('DELETE FROM progress WHERE episode_id=?').run(e.id);
   db.prepare('DELETE FROM episodes WHERE id=?').run(e.id);
   res.json({ ok: 1 });
@@ -558,13 +645,41 @@ A.post('/api/movies/:id/finish', async (req, res) => {
     res.json({ ok: 1 });
   } catch (err) { res.status(500).json({ error: 'Birlashtirishda xato' }); }
 });
+// S3 ga to'g'ridan-to'g'ri tez yuklash
+A.post('/api/s3/init', ah(async (req, res) => {
+  if (!st.enabled) return res.status(400).json({ error: 'S3 sozlanmagan' });
+  const size = +req.body.size || 0;
+  let ext = String(req.body.ext || '.mp4').toLowerCase();
+  if (!/^\.[a-z0-9]{1,6}$/.test(ext)) ext = '.mp4';
+  const partSize = 16 * 1024 * 1024, n = Math.max(1, Math.ceil(size / partSize));
+  if (n > 9000) return res.status(400).json({ error: 'Fayl juda katta' });
+  const key = 'v/' + crypto.randomBytes(12).toString('hex') + ext;
+  const uploadId = await st.mpInit(key, req.body.type || 'video/mp4');
+  const urls = await Promise.all(Array.from({ length: n }, (_, i) => st.partUrl(key, uploadId, i + 1)));
+  res.json({ key, uploadId, partSize, urls });
+}));
+A.post('/api/s3/complete', ah(async (req, res) => {
+  const { key, uploadId, parts, movieId, number, size, first, notify } = req.body;
+  if (!st.enabled || !/^v\/[a-f0-9]{24}\.[a-z0-9]{1,6}$/.test(String(key))) return res.status(400).json({ error: 'Xato' });
+  await st.mpComplete(key, uploadId, (parts || []).map(p => ({ PartNumber: +p.n, ETag: p.etag })));
+  db.prepare('INSERT INTO episodes(movie_id,number,file,size) VALUES(?,?,?,?)').run(movieId, +number || 1, 's3:' + key, +size || 0);
+  if (first) announce(+movieId, !!notify, true);
+  res.json({ ok: 1 });
+}));
+A.post('/api/s3/abort', ah(async (req, res) => {
+  try { await st.mpAbort(req.body.key, req.body.uploadId); } catch (e) {}
+  res.json({ ok: 1 });
+}));
 // to'lovlar
 A.get('/api/purchases', (req, res) => res.json(db.prepare("SELECT p.*,m.title,u.name,u.username FROM purchases p JOIN movies m ON m.id=p.movie_id LEFT JOIN users u ON u.tg_id=p.user_id WHERE p.status='pending' ORDER BY p.id DESC").all()));
-A.get('/api/receipt/:id', (req, res) => {
+A.get('/api/receipt/:id', ah(async (req, res) => {
   const p = db.prepare('SELECT receipt FROM purchases WHERE id=?').get(req.params.id);
   if (!p) return res.sendStatus(404);
-  res.sendFile(path.join(PRIV, path.basename(p.receipt)));
-});
+  const f = path.join(PRIV, path.basename(p.receipt));
+  if (fs.existsSync(f)) return res.sendFile(f);
+  if (st.enabled) return proxyS3(req, res, 'r/' + path.basename(p.receipt), 'image/jpeg', 'private, max-age=3600');
+  res.sendStatus(404);
+}));
 A.post('/api/purchases/:id/:act', ah(async (req, res) => {
   const p = db.prepare('SELECT p.*,m.title FROM purchases p JOIN movies m ON m.id=p.movie_id WHERE p.id=?').get(req.params.id);
   if (!p) return res.sendStatus(404);
@@ -609,7 +724,9 @@ A.post('/api/banners', upAdmin.single('file'), ah(async (req, res) => {
   if (!req.file) return res.status(400).json({ error: 'Fayl tanlang' });
   const isVideo = req.file.mimetype.startsWith('video');
   const file = isVideo ? req.file.filename : await optimizeImage(req.file.filename, 1200);
-  db.prepare('INSERT INTO banners(file,kind,link) VALUES(?,?,?)').run(file, isVideo ? 'video' : 'image', req.body.link || '');
+  await persistImage(file, isVideo ? 'video/mp4' : null);
+  const place = ['top', 'inline', 'detail'].includes(req.body.place) ? req.body.place : 'top';
+  db.prepare('INSERT INTO banners(file,kind,link,place) VALUES(?,?,?,?)').run(file, isVideo ? 'video' : 'image', req.body.link || '', place);
   res.json({ ok: 1 });
 }));
 A.post('/api/banners/:id/toggle', (req, res) => { db.prepare('UPDATE banners SET active=1-active WHERE id=?').run(req.params.id); res.json({ ok: 1 }); });
@@ -660,7 +777,16 @@ A.delete('/api/bots/:id', sup, ah(async (req, res) => {
 }));
 
 // ---------- statik ----------
-app.use('/files', (req, res, next) => (req.path.startsWith('/private') ? res.sendStatus(403) : next()), express.static(UP, { maxAge: '30d', immutable: true }));
+app.get('/files/:name', ah(async (req, res) => {
+  const name = path.basename(req.params.name), local = path.join(UP, name);
+  try { if (fs.statSync(local).isFile()) return res.sendFile(local, { maxAge: '30d', immutable: true }); } catch (e) {}
+  if (!st.enabled) return res.sendStatus(404);
+  if (process.env.S3_PUBLIC_URL) {
+    res.set('Cache-Control', 'public, max-age=86400');
+    return res.redirect(302, `${process.env.S3_PUBLIC_URL.replace(/\/$/, '')}/img/${encodeURIComponent(name)}`);
+  }
+  try { await proxyS3(req, res, 'img/' + name); } catch (e) { if (!res.headersSent) res.sendStatus(404); }
+}));
 app.use(express.static(path.join(__dirname, 'public'), {
   setHeaders: (res, p) => { res.setHeader('Cache-Control', p.endsWith('.html') ? 'no-cache' : 'public, max-age=86400'); }
 }));
@@ -672,5 +798,10 @@ app.use((err, req, res, next) => { console.error(err.message); res.status(500).j
   for (const r of db.prepare('SELECT * FROM bots WHERE active=1').all()) {
     try { await startBot(r); } catch (e) { console.error('Bot ishga tushmadi', r.id, e.message); }
   }
-  app.listen(PORT, () => console.log(`VITRINO TV: port ${PORT} | panel: ${BASE}/${AP} | disk: ${PERSIST ? 'doimiy' : 'DOIMIY EMAS'}`));
+  app.listen(PORT, () => console.log(`VITRINO TV: port ${PORT} | panel: ${BASE}/${AP} | saqlash: ${st.enabled ? 'S3' : PERSIST ? 'disk' : 'DOIMIY EMAS'}`));
+  if (st.enabled) {
+    setInterval(() => runBackup(false), 30000);
+    ['SIGTERM', 'SIGINT'].forEach(sg => process.on(sg, async () => { await runBackup(true); process.exit(0); }));
+  }
+  if (BASE && process.env.RENDER && process.env.KEEP_AWAKE !== '0') setInterval(() => { fetch(BASE + '/health').catch(() => {}); }, 9 * 60 * 1000);
 })();

@@ -59,6 +59,24 @@ h2{margin:16px 16px 10px;font-size:18px}
 .pbar{height:4px;background:rgba(255,255,255,.2)}
 .pbar i{display:block;height:100%;background:var(--g)}
 .sk{border-radius:18px;aspect-ratio:2/3;background:linear-gradient(110deg,#0b1a11 30%,#15301f 50%,#0b1a11 70%);background-size:200% 100%;animation:shine 1.3s infinite}
+.hz{position:relative;margin:12px 16px 4px;border-radius:26px;overflow:hidden;aspect-ratio:4/5;max-height:64vh;width:calc(100% - 32px);box-shadow:0 18px 50px rgba(57,255,20,.16);border:1px solid var(--b);cursor:pointer;animation:up .5s both}
+.hz>img.bg{width:100%;height:100%;object-fit:cover;object-position:top;display:block}
+.hz .sh{position:absolute;inset:0;background:linear-gradient(transparent 38%,rgba(5,13,8,.75) 70%,var(--bg))}
+.hz .ct{position:absolute;left:18px;right:18px;bottom:18px}
+.hz h1{margin:8px 0 6px;font-size:28px;line-height:1.1;text-shadow:0 2px 14px #000}
+.hz p{margin:0 0 14px;color:#cfe8d6;font-size:14px}
+.hz .meta{display:flex;gap:8px;margin:0}.hz .meta span{padding:4px 10px;border-radius:99px;background:rgba(0,0,0,.5);font-size:12px;backdrop-filter:blur(8px)}
+.hz .bt{display:flex;gap:10px}.hz .bt .btn{width:auto;flex:1;min-height:48px}
+.hz .wm{top:14px;right:14px;width:84px}
+.ad{position:relative;margin:14px 16px;border-radius:20px;overflow:hidden;aspect-ratio:16/6;border:1px solid var(--b);box-shadow:0 10px 30px rgba(0,0,0,.4)}
+.ad img,.ad video,.b img,.b video{width:100%;height:100%;object-fit:cover;display:block}
+.adtag{position:absolute;top:8px;left:8px;padding:2px 8px;border-radius:99px;background:rgba(0,0,0,.6);font-size:10px;letter-spacing:.5px;color:#cfe8d6;text-transform:uppercase}
+.b{position:relative}
+h2{display:flex;align-items:center;gap:8px}
+h2:before{content:"";width:4px;height:18px;border-radius:4px;background:linear-gradient(var(--g),var(--g2));box-shadow:0 0 12px var(--g)}
+.btn:active,.chip:active,.round:active,.dl2:active,.er .play:active,.er .dl:active,nav button:active{transform:scale(.95)}
+.skipi{position:absolute;right:16px;bottom:calc(24px + var(--sb));z-index:6;padding:12px 18px;border-radius:99px;background:rgba(0,0,0,.65);border:1px solid var(--g);color:var(--g);font-weight:800;backdrop-filter:blur(10px)}
+#player.intro .pc{display:none}
 .empty{grid-column:1/-1;text-align:center;color:var(--m);padding:40px 20px}
 nav{position:fixed;left:12px;right:12px;bottom:calc(10px + var(--sb));z-index:20;display:flex;padding:6px;border-radius:24px;background:rgba(10,24,15,.9);backdrop-filter:blur(20px);-webkit-backdrop-filter:blur(20px);border:1px solid var(--b);box-shadow:0 10px 40px rgba(0,0,0,.6);transition:transform .3s}
 nav.gone{transform:translateY(140%)}
@@ -172,7 +190,7 @@ const ICON = {
   fs: '<svg class="i" viewBox="0 0 24 24"><path d="M4 9V4h5M20 9V4h-5M4 15v5h5M20 15v5h-5"/></svg>',
   search: '<svg class="i" viewBox="0 0 24 24"><circle cx="11" cy="11" r="7"/><path d="m20 20-3.500-3.500"/></svg>'
 };
-let TAB = 'home', Q = '', CAT = '', HB = null, bannerTimer = null;
+let TAB = 'home', Q = '', CAT = '', HB = null, HH = null, HT = [], HC = [], bannerTimer = null, syncT = null;
 
 async function api(p, opt = {}) {
   const r = await fetch('/api' + p, { ...opt, headers: { 'x-init': tg.initData, 'x-bot': BOT, ...(opt.headers || {}) } });
@@ -198,31 +216,54 @@ function setTab(t) {
   $('#view').innerHTML = ''; window.scrollTo(0, 0);
   ({ home: loadHome, favs: loadFavs, dl: loadDl, me: loadMe })[t]();
 }
-async function loadHome() {
-  if (!$('#gd')) $('#view').innerHTML = skel(6);
-  let d; try { d = await api(`/home?q=${encodeURIComponent(Q)}&cat=${CAT}`); } catch (e) { return toast('Ulanishda xatolik'); }
-  if (d.missing.length) return lockSub(d.missing);
-  if (d.needPhone) return lockPhone();
-  if (!$('#gd')) {
-    $('#view').innerHTML = `<div class="search">${ICON.search}<input id="si" placeholder="Kino qidirish..." value="${esc(Q)}" enterkeyhint="search"></div>
-    <div class="ban" id="bn"></div><div class="chips" id="ch"></div><div id="co"></div><div id="tp"></div><h2 id="gt">🆕 Yangi kinolar</h2><div class="g" id="gd"></div>`;
-    let tm; $('#si').oninput = e => { clearTimeout(tm); tm = setTimeout(() => { Q = e.target.value.trim(); loadHome(); }, 350); };
-  }
-  if (d.banners) HB = d.banners;
+function mediaTag(b) { return b.kind === 'video' ? `<video src="/files/${esc(b.file)}" autoplay muted loop playsinline></video>` : `<img src="/files/${esc(b.file)}" alt="" loading="lazy">`; }
+function adAttrs(b) { return b.link ? `data-act="link" data-u="${esc(b.link)}" data-id="${b.id}"` : ''; }
+function adSlide(b) { return `<div class="b" ${adAttrs(b)}>${mediaTag(b)}<span class="adtag">Reklama</span></div>`; }
+function adHtml(b) { return `<div class="ad" ${adAttrs(b)}>${mediaTag(b)}<span class="adtag">Reklama</span></div>`; }
+function heroHtml(h) {
+  return `<div class="hz" data-act="open" data-id="${h.id}"><img class="bg" src="/files/${esc(h.poster)}" alt=""><div class="sh"></div><img class="wm" src="/watermark.png" alt="">
+  <div class="ct"><div class="meta">${h.year ? `<span>${h.year}</span>` : ''}${h.cat ? `<span>${esc(h.cat)}</span>` : ''}<span>${h.type === 'series' ? 'Serial' : 'Kino'}</span></div><h1>${esc(h.title)}</h1>
+  <p>${esc((h.description || '').slice(0, 90))}</p><div class="bt"><span class="btn pri">${ICON.play}Ko'rish</span><span class="btn sec">Batafsil</span></div></div></div>`;
+}
+function startBanners() {
+  clearInterval(bannerTimer);
+  bannerTimer = setInterval(() => {
+    const bn = $('#bn'); if (TAB !== 'home' || !bn || bn.children.length < 2 || bn.style.display === 'none') return;
+    const w = bn.clientWidth * .88 + 12; bn.scrollTo({ left: bn.scrollLeft + w >= bn.scrollWidth - 20 ? 0 : bn.scrollLeft + w, behavior: 'smooth' });
+  }, 4500);
+}
+function homeLayout() {
+  $('#view').innerHTML = `<div class="search">${ICON.search}<input id="si" placeholder="Kino qidirish..." value="${esc(Q)}" enterkeyhint="search"></div>
+  <div id="hz"></div><div class="ban" id="bn"></div><div class="chips" id="ch"></div><div id="co"></div><div id="tp"></div><div id="ad1"></div><h2 id="gt">Yangi kinolar</h2><div class="g" id="gd">${'<div class="sk"></div>'.repeat(6)}</div>`;
+  let tm; $('#si').oninput = e => { clearTimeout(tm); tm = setTimeout(() => { Q = e.target.value.trim(); loadHome(); }, 350); };
+}
+function paintHome(d) {
   const filt = !!(Q || CAT);
-  const bn = $('#bn');
-  bn.style.display = filt || !HB.length ? 'none' : 'flex';
-  if (!filt && !bn.dataset.k) {
-    bn.dataset.k = 1;
-    bn.innerHTML = HB.map(b => `<div class="b" ${b.link ? `data-act="link" data-u="${esc(b.link)}"` : ''}>${b.kind === 'video' ? `<video src="/files/${esc(b.file)}" autoplay muted loop playsinline></video>` : `<img src="/files/${esc(b.file)}" alt="">`}</div>`).join('');
-    clearInterval(bannerTimer);
-    bannerTimer = setInterval(() => { if (HB && HB.length > 1 && TAB === 'home') { const w = bn.clientWidth * .88 + 12; bn.scrollTo({ left: bn.scrollLeft + w >= bn.scrollWidth - 20 ? 0 : bn.scrollLeft + w, behavior: 'smooth' }); } }, 4500);
-  }
+  if (!filt) { if (d.banners) HB = d.banners; if ('hero' in d) HH = d.hero; HT = d.top || HT; HC = d.cont || HC; }
+  const tops = (HB || []).filter(b => (b.place || 'top') === 'top'), inl = (HB || []).filter(b => b.place === 'inline');
+  $('#hz').innerHTML = !filt && HH ? heroHtml(HH) : '';
+  const bn = $('#bn'); bn.style.display = filt || !tops.length ? 'none' : 'flex';
+  if (!filt && tops.length && bn.dataset.k !== String(tops.map(b => b.id)) ) { bn.dataset.k = String(tops.map(b => b.id)); bn.innerHTML = tops.map(adSlide).join(''); startBanners(); }
   $('#ch').innerHTML = `<button class="chip ${CAT ? '' : 'on'}" data-act="cat" data-id="">Hammasi</button>` + d.categories.map(c => `<button class="chip ${CAT == c.id ? 'on' : ''}" data-act="cat" data-id="${c.id}">${esc(c.name)}</button>`).join('');
-  $('#co').innerHTML = !filt && d.cont && d.cont.length ? `<h2>▶ Davom ettirish</h2><div class="rail">${d.cont.map((m, i) => card(m, i, { prog: 1 })).join('')}</div>` : '';
-  $('#tp').innerHTML = !filt && d.top && d.top.length ? `<h2>🔥 Ko'p ko'rilgan</h2><div class="rail">${d.top.map((m, i) => card(m, i, { rank: i + 1 })).join('')}</div>` : '';
+  $('#co').innerHTML = !filt && HC.length ? `<h2>Davom ettirish</h2><div class="rail">${HC.map((m, i) => card(m, i, { prog: 1 })).join('')}</div>` : '';
+  $('#tp').innerHTML = !filt && HT.length ? `<h2>Ko'p ko'rilgan</h2><div class="rail">${HT.map((m, i) => card(m, i, { rank: i + 1 })).join('')}</div>` : '';
+  $('#ad1').innerHTML = !filt && inl.length ? adHtml(inl[Math.floor(Math.random() * inl.length)]) : '';
   $('#gt').style.display = filt ? 'none' : '';
   $('#gd').innerHTML = d.movies.map((m, i) => card(m, i)).join('') || '<div class="empty">Hech narsa topilmadi 🎬</div>';
+}
+async function loadHome() {
+  if (!$('#gd')) {
+    homeLayout();
+    if (!Q && !CAT) { try { const c = JSON.parse(localStorage.getItem('vh') || 'null'); if (c && c.movies) paintHome(c); } catch (e) {} }
+  }
+  const slow = setTimeout(() => toast("Server uyg'onmoqda, biroz kuting..."), 5000);
+  let d; try { d = await api(`/home?q=${encodeURIComponent(Q)}&cat=${CAT}`); } catch (e) { clearTimeout(slow); return toast('Ulanishda xatolik'); }
+  clearTimeout(slow);
+  if (d.missing.length) return lockSub(d.missing);
+  if (d.needPhone) return lockPhone();
+  if (!$('#gd')) homeLayout();
+  if (!Q && !CAT) { try { localStorage.setItem('vh', JSON.stringify(d)); } catch (e) {} }
+  paintHome(d);
 }
 async function loadFavs() {
   $('#view').innerHTML = '<h2>❤️ Sevimlilar</h2>' + skel(4);
@@ -243,6 +284,7 @@ async function loadMe() {
   $('#view').innerHTML = `<div class="prof"><div class="av">${esc((u.name || '?').trim().charAt(0).toUpperCase())}</div><h2 style="margin:0">${esc(u.name)}</h2>
   <div class="mut">${u.username ? '@' + esc(u.username) : ''} ${u.phone ? '• ' + esc(u.phone) : ''}</div></div>
   <div class="stats"><div><b>${d.watched}</b><small>Ko'rilgan</small></div><div><b>${d.favs}</b><small>Sevimli</small></div><div><b>${d.bought.filter(x => x.st === 'approved').length}</b><small>Xarid</small></div></div>
+  ${typeof tg.addToHomeScreen === 'function' ? '<div style="padding:0 16px 6px"><button class="btn sec" data-act="addhome">📲 Bosh ekranga qo\'shish</button></div>' : ''}
   <h2>💳 Xaridlar</h2><div class="g">${d.bought.map((m, i) => card(m, i)).join('') || '<div class="empty">Hali xarid yo\'q</div>'}</div>`;
   document.querySelectorAll('#view .card').forEach((c, i) => { const b = d.bought[i]; if (b) c.insertAdjacentHTML('beforeend', `<span class="st2 ${b.st}" style="position:absolute;top:34px;left:9px">${ST[b.st] || ''}</span>`); });
 }
@@ -288,7 +330,7 @@ function renderMovie() {
   S.innerHTML = `<div class="hero">${m.poster ? `<img class="bg" src="/files/${esc(m.poster)}">` : ''}<img class="wm" src="/watermark.png">
     <div class="topbtns"><button class="round" data-act="closesheet">${ICON.back}</button><span class="sp"></span><button class="round ${d.fav ? 'on' : ''}" data-act="fav" data-id="${m.id}">${ICON.heart}</button><button class="round" data-act="share" data-id="${m.id}">${ICON.share}</button></div></div>
     <div class="det"><h1>${esc(m.title)}</h1><div class="meta">${m.year ? `<span>${m.year}</span>` : ''}${m.cat ? `<span>${esc(m.cat)}</span>` : ''}<span>${m.type === 'series' ? 'Serial' : 'Kino'}</span><span>👁 ${m.views}</span><span>${fmt(m.price)}</span></div>
-    ${m.description ? `<p class="desc">${esc(m.description)}</p>` : ''}${act}
+    ${m.description ? `<p class="desc">${esc(m.description)}</p>` : ''}${act}${d.ad ? adHtml(d.ad).replace('class="ad"', 'class="ad" style="margin:18px 0 0"') : ''}
     ${d.related.length ? `<h2 style="margin:24px 0 10px">O'xshash kinolar</h2><div class="rail" style="margin:0 -18px;padding:0 18px">${d.related.map((x, i) => card(x, i)).join('')}</div>` : ''}</div>`;
   const rc = $('#rc'); if (rc) rc.onchange = () => { $('#rcn').textContent = '✅ ' + rc.files[0].name; };
 }
@@ -302,7 +344,7 @@ async function download(epId, title, num) {
   hap('medium');
   try {
     const p = await api('/play/' + epId); if (!p.dl) return toast('Yuklab olish yopiq');
-    const url = location.origin + p.dl, fname = (title + '-' + num + '.mp4').replace(/[^\w.\-]+/g, '_');
+    const url = /^https?:/.test(p.dl) ? p.dl : location.origin + p.dl, fname = (title + '-' + num + '.mp4').replace(/[^\w.\-]+/g, '_');
     if (tg.downloadFile && tg.isVersionAtLeast && tg.isVersionAtLeast('8.0')) tg.downloadFile({ url, file_name: fname }); else tg.openLink(url);
     toast('⬇ Yuklab olish boshlandi');
   } catch (e) { toast('Xatolik'); }
@@ -310,41 +352,54 @@ async function download(epId, title, num) {
 
 /* ---------- pleyer ---------- */
 let PL = null;
-async function play(epId) {
+async function play(epId, noIntro) {
   hap();
-  let p; try { p = await api('/play/' + epId); } catch (e) { return toast("Ochib bo'lmadi"); }
-  const P = $('#player'); PL = { ep: epId, next: p.next, last: 0, hide: null, speed: 1 };
-  P.innerHTML = `<video id="vd" src="${p.url}" playsinline webkit-playsinline preload="auto"></video><img class="wm" src="/watermark.png"><div class="spin" id="spin"></div><div class="tap" id="tap"></div>
+  let p; try { p = await api('/play/' + epId + (noIntro ? '?noi=1' : '')); } catch (e) { return toast("Ochib bo'lmadi"); }
+  const P = $('#player'); PL = { ep: epId, next: p.next, last: 0, hide: null, speed: 1, intro: !!p.intro };
+  P.innerHTML = `<video id="vd" src="${p.intro || p.url}" playsinline webkit-playsinline preload="auto"></video><img class="wm" src="/watermark.png"><div class="spin" id="spin"></div><div class="tap" id="tap"></div>
+  <button class="skipi" id="skipi" data-act="skipintro" style="display:none">O'tkazib yuborish ▶</button>
   <div class="pc" id="pc"><div class="pt"><button class="round" data-act="closep">${ICON.close}</button><b>${esc(p.title)}${p.number > 1 || p.next ? ' • ' + p.number + '-qism' : ''}</b></div>
   <div class="pm2"><button class="sk10" data-act="seek" data-s="-10">−10</button><button class="pp" id="pp" data-act="pp">${ICON.play}</button><button class="sk10" data-act="seek" data-s="10">+10</button></div>
   <div class="pb"><div class="tm"><span id="cur">0:00</span><input id="sk" type="range" min="0" max="1000" value="0"><span id="dur">0:00</span></div>
   <div class="pr"><button data-act="speed" id="spd">1x</button>${p.next ? '<button data-act="nextep">Keyingi ▶</button>' : '<span></span>'}<button data-act="fs">${ICON.fs}</button></div></div></div>`;
+  P.classList.toggle('intro', !!p.intro);
   P.classList.add('open'); tg.BackButton.show(); $('#nav').classList.add('gone');
   try { tg.disableVerticalSwipes && tg.disableVerticalSwipes(); } catch (e) {}
   const v = $('#vd'), sk = $('#sk'), spin = $('#spin');
-  v.addEventListener('loadedmetadata', () => { $('#dur').textContent = fmtT(v.duration); if (p.pos > 5 && p.pos < v.duration - 15) v.currentTime = p.pos; v.play().catch(() => {}); });
+  PL.movieUrl = p.url; PL.pos = p.pos;
+  if (p.intro) setTimeout(() => { const b = $('#skipi'); if (b && PL && PL.intro) b.style.display = 'block'; }, 5000);
+  v.addEventListener('loadedmetadata', () => {
+    if (PL.intro) { v.play().catch(() => {}); return; }
+    $('#dur').textContent = fmtT(v.duration); if (PL.pos > 5 && PL.pos < v.duration - 15) { v.currentTime = PL.pos; PL.pos = 0; } v.play().catch(() => {});
+  });
   v.addEventListener('timeupdate', () => {
-    if (!v.duration) return; const pc = v.currentTime / v.duration * 100;
+    if (PL.intro || !v.duration) return; const pc = v.currentTime / v.duration * 100;
     $('#cur').textContent = fmtT(v.currentTime); if (!PL.drag) { sk.value = pc * 10; sk.style.setProperty('--p', pc + '%'); }
     if (Date.now() - PL.last > 10000) { PL.last = Date.now(); saveProg(); }
   });
   v.addEventListener('play', () => { $('#pp').innerHTML = ICON.pause; showCtl(); });
-  v.addEventListener('pause', () => { $('#pp').innerHTML = ICON.play; showCtl(true); saveProg(); });
+  v.addEventListener('pause', () => { $('#pp').innerHTML = ICON.play; if (!PL.intro) { showCtl(true); saveProg(); } });
   v.addEventListener('waiting', () => { spin.style.display = 'block'; });
   v.addEventListener('playing', () => { spin.style.display = 'none'; });
-  v.addEventListener('ended', () => { saveProg(); if (PL && PL.next) { const n = PL.next; play(n); } });
+  v.addEventListener('ended', () => { if (PL.intro) return startMovie(); saveProg(); if (PL && PL.next) { const n = PL.next; play(n, true); } });
   v.addEventListener('error', () => toast('Video ochilmadi'));
   sk.addEventListener('input', () => { PL.drag = true; $('#cur').textContent = fmtT(sk.value / 1000 * v.duration); sk.style.setProperty('--p', sk.value / 10 + '%'); });
   sk.addEventListener('change', () => { v.currentTime = sk.value / 1000 * v.duration; PL.drag = false; showCtl(); });
   let lastTap = 0;
   $('#tap').addEventListener('click', e => {
+    if (PL.intro) return;
     const t = Date.now(), x = e.clientX / innerWidth;
-    if (t - lastTap < 300) { lastTap = 0; const s = x < .4 ? -10 : x > .6 ? 10 : 0; if (s) { seek(s); flash(s); } return; }
+    if (t - lastTap < 300) { lastTap = 0; const sv = x < .4 ? -10 : x > .6 ? 10 : 0; if (sv) { seek(sv); flash(sv); } return; }
     lastTap = t; setTimeout(() => { if (lastTap === t) { $('#pc').classList.contains('hide') ? showCtl() : $('#pc').classList.add('hide'); } }, 300);
   });
   showCtl();
 }
-function showCtl(keep) { const pc = $('#pc'); if (!pc) return; pc.classList.remove('hide'); clearTimeout(PL.hide); const v = $('#vd'); if (!keep && v && !v.paused) PL.hide = setTimeout(() => pc.classList.add('hide'), 3200); }
+function startMovie() {
+  if (!PL || !PL.intro) return;
+  PL.intro = false; const v = $('#vd'); $('#player').classList.remove('intro'); const b = $('#skipi'); if (b) b.style.display = 'none';
+  v.src = PL.movieUrl; v.load(); showCtl();
+}
+function showCtl(keep) { const pc = $('#pc'); if (!pc || !PL) return; pc.classList.remove('hide'); clearTimeout(PL.hide); const v = $('#vd'); if (!keep && v && !v.paused) PL.hide = setTimeout(() => pc.classList.add('hide'), 3200); }
 function seek(s) { const v = $('#vd'); if (v) { v.currentTime = Math.max(0, Math.min(v.duration || 1e9, v.currentTime + s)); showCtl(); } }
 function flash(s) { const el = document.createElement('div'); el.className = 'flash'; el.style[s < 0 ? 'left' : 'right'] = '12%'; el.textContent = s < 0 ? '⏪ 10s' : '10s ⏩'; $('#player').appendChild(el); setTimeout(() => el.remove(), 600); }
 function saveProg() {
@@ -376,7 +431,9 @@ const ACT = {
   tab: el => setTab(el.dataset.t),
   open: el => openMovie(+el.dataset.id),
   cat: el => { CAT = el.dataset.id; loadHome(); },
-  link: el => tg.openLink(el.dataset.u),
+  link: el => { if (el.dataset.id) api('/banner/' + el.dataset.id + '/click', { method: 'POST' }).catch(() => {}); const u = el.dataset.u; /^https?:\/\/(t\.me|telegram\.me)\//.test(u) ? tg.openTelegramLink(u) : tg.openLink(u); },
+  addhome: () => { try { tg.addToHomeScreen(); } catch (e) { toast('Telegram ilovasini yangilang'); } },
+  skipintro: () => startMovie(),
   tglink: el => tg.openTelegramLink(el.dataset.u),
   reload: () => { TAB === 'home' && ($('#view').innerHTML = '', loadHome()); },
   phone: () => { try { tg.requestContact(ok => { if (ok) { toast('✅ Rahmat'); setTimeout(() => { $('#view').innerHTML = ''; loadHome(); }, 1800); } else toast('Raqam yuborilmadi'); }); } catch (e) { toast('Botga qaytib /start bosing'); setTimeout(() => tg.close(), 1200); } },
@@ -391,7 +448,7 @@ const ACT = {
   pp: () => { const v = $('#vd'); v.paused ? v.play() : v.pause(); },
   seek: el => seek(+el.dataset.s),
   speed: () => { const L = [1, 1.25, 1.5, 2, .75]; PL.speed = L[(L.indexOf(PL.speed) + 1) % L.length]; $('#vd').playbackRate = PL.speed; $('#spd').textContent = PL.speed + 'x'; showCtl(); },
-  nextep: () => { const n = PL.next; saveProg(); play(n); },
+  nextep: () => { const n = PL.next; saveProg(); play(n, true); },
   fs: () => toggleFs()
 };
 document.addEventListener('click', e => { const el = e.target.closest('[data-act]'); if (!el || !ACT[el.dataset.act]) return; e.preventDefault(); if (!['pp', 'seek', 'speed'].includes(el.dataset.act)) hap(); ACT[el.dataset.act](el); });
@@ -404,12 +461,23 @@ async function startLive() {
     if (es) es.close();
     es = new EventSource('/live?t=' + encodeURIComponent(t));
     es.addEventListener('online', e => { $('#online').textContent = JSON.parse(e.data).n + ' online'; });
-    es.addEventListener('new', e => { toast('🆕 Yangi kino: ' + JSON.parse(e.data).title); if (TAB === 'home' && !$('#sheet').classList.contains('open') && !PL) loadHome(); });
+    es.addEventListener('new', e => {
+      const m = JSON.parse(e.data); toast('🆕 Yangi kino: ' + m.title); hap('medium');
+      try { localStorage.removeItem('vh'); } catch (x) {}
+      if (TAB === 'home' && $('#gd') && !Q && !CAT && m.price !== undefined) { $('#gd').insertAdjacentHTML('afterbegin', card(m, 0)); }
+    });
+    es.addEventListener('sync', () => {
+      clearTimeout(syncT);
+      syncT = setTimeout(() => { if (TAB === 'home' && !$('#sheet').classList.contains('open') && !PL) loadHome(); }, 800);
+    });
     es.addEventListener('paid', e => { const d = JSON.parse(e.data); toast(d.ok ? "✅ To'lov tasdiqlandi: " + d.title : "❌ To'lov tasdiqlanmadi"); hap('medium'); if (MV && MV.movie.id === d.movie) openMovie(d.movie); });
     es.onerror = () => { es.close(); setTimeout(startLive, 5000); };
   } catch (e) { setTimeout(startLive, 8000); }
 }
+document.addEventListener('visibilitychange', () => { if (!document.hidden && TAB === 'home' && !$('#sheet').classList.contains('open') && !PL && $('#gd')) loadHome(); });
 (async () => {
+  const SP = (tg.initDataUnsafe && tg.initDataUnsafe.start_param) || '';
+  const sm = /^m(\d+)$/.exec(SP); if (sm && !M0) M0 = sm[1];
   await loadHome();
   setTimeout(() => $('#splash').classList.add('hide'), 700);
   startLive();

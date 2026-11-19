@@ -80,10 +80,42 @@ async function chunkUpload(file, id, number, extra, cb) {
       done++; if (cb) cb(Math.round(done / total * 100));
     }
   }
-  await Promise.all(Array.from({ length: 6 }, worker));
+  await Promise.all(Array.from({ length: 8 }, worker));
   const ext = (file.name.match(/\.[A-Za-z0-9]+$/) || ['.mp4'])[0];
   await req('POST', '/movies/' + id + '/finish', Object.assign({ uid, total, ext, number }, extra || {}));
 }
+async function s3Upload(file, id, number, extra, cb) {
+  const ext = (file.name.match(/\.[A-Za-z0-9]+$/) || ['.mp4'])[0];
+  const init = await req('POST', '/s3/init', { size: file.size, ext, type: file.type || 'video/mp4' });
+  const parts = new Array(init.urls.length); let next = 0, done = 0;
+  async function worker() {
+    while (next < init.urls.length) {
+      const i = next++, blob = file.slice(i * init.partSize, (i + 1) * init.partSize);
+      for (let t = 0; ; t++) {
+        try {
+          const r = await fetch(init.urls[i], { method: 'PUT', body: blob });
+          if (!r.ok) throw new Error('http' + r.status);
+          const et = r.headers.get('ETag');
+          if (!et) throw new Error('cors');
+          parts[i] = { n: i + 1, etag: et }; break;
+        } catch (e) {
+          if (e.message === 'cors' || t >= 4) throw e;
+          await new Promise(r => setTimeout(r, 1500 * (t + 1)));
+        }
+      }
+      done++; if (cb) cb(Math.round(done / init.urls.length * 100));
+    }
+  }
+  try {
+    await Promise.all(Array.from({ length: 8 }, worker));
+  } catch (e) {
+    req('POST', '/s3/abort', { key: init.key, uploadId: init.uploadId }).catch(() => {});
+    if (e.message === 'cors') toast("CORS sozlanmagan: bucket CORS'da PUT ruxsat va ExposeHeaders ETag qo'shing");
+    throw e;
+  }
+  await req('POST', '/s3/complete', Object.assign({ key: init.key, uploadId: init.uploadId, parts, movieId: id, number, size: file.size }, extra || {}));
+}
+function uploadVideo(file, id, number, extra, cb) { return ME && ME.s3 ? s3Upload(file, id, number, extra, cb) : chunkUpload(file, id, number, extra, cb); }
 function showLogin() { $('#login').style.display = 'grid'; $('#app').style.display = 'none'; if (LIVE) { LIVE.close(); LIVE = null; } }
 async function doLogin() { try { await req('POST', '/login', { username: $('#lu').value, password: $('#lp').value }); start(); } catch (e) {} }
 const NAMES = { dash: '📊 Statistika', movies: '🎬 Kinolar', cats: '🗂 Kategoriyalar', pays: "💳 To'lovlar", banners: '🖼 Reklama', users: '👥 Foydalanuvchilar', msg: '📣 Xabar yuborish', subs: '📢 Majburiy obuna', bots: '🤖 Botlar', admins: '🛡 Adminlar', settings: '⚙️ Sozlamalar', acc: '🔐 Hisob' };
@@ -108,7 +140,7 @@ function closeModal() { const m = $('#mo'); if (m) m.remove(); }
 const tabs = {
   async dash() {
     const s = await req('GET', '/stats');
-    out(`${s.persistent ? '' : `<div class="warn">⚠️ <b>Doimiy disk ulanmagan!</b> Kinolar, foydalanuvchilar va sozlamalar server qayta ishga tushganda <b>o'chib ketadi</b>. Render → xizmat → <b>Disk</b> → Add Disk (Mount path: <code>/var/data</code>) va Environment'da <code>DATA_DIR=/var/data</code> qo'ying. Pullik (Starter) tarif kerak.</div>`}
+    out(`${s.persistent ? '' : `<div class="warn">⚠️ <b>Doimiy disk ulanmagan!</b> Kinolar, foydalanuvchilar va sozlamalar server qayta ishga tushganda <b>o'chib ketadi</b>. Ikki yo'l: (1) bepul S3 saqlash (Cloudflare R2 / Backblaze B2) ulash, yoki (2) Render'da pullik <b>Disk</b> qo'shish (Mount path <code>/var/data</code>, <code>DATA_DIR=/var/data</code>).</div>`}
     <h2>📊 Statistika</h2><div class="cards">
     <div class="st">Foydalanuvchilar<b>${s.users}</b></div><div class="st">Bugun qo'shilgan<b>${s.today}</b></div><div class="st">Online (5 daq)<b>${s.online}</b></div><div class="st">Hozir ochiq<b>${s.live}</b></div>
     <div class="st">Bloklangan<b>${s.blocked}</b></div><div class="st">Kinolar<b>${s.movies}</b></div><div class="st">Ko'rishlar<b>${s.views}</b></div><div class="st">Kutilayotgan to'lov<b>${s.pending}</b></div></div>`);
@@ -122,7 +154,8 @@ const tabs = {
     <div class="row"><input id="mp" type="number" placeholder="Narxi (0 = bepul)" value="0"><input id="mn" type="number" placeholder="Qism raqami (serial uchun)" value="1"></div>
     <textarea id="md" rows="3" placeholder="Tavsif"></textarea>
     <label><input type="checkbox" id="mdl" checked>Foydalanuvchi yuklab olishi mumkin</label><br>
-    <label><input type="checkbox" id="mnf">Hammaga xabar yuborish (yangi kino)</label>
+    <label><input type="checkbox" id="mnf">Hammaga xabar yuborish (yangi kino)</label><br>
+    <label><input type="checkbox" id="mft">Bosh sahifada katta (hero) qilib ko'rsatish</label>
     <p>🖼 Poster: <input id="mpo" type="file" accept="image/*"></p><p>🎞 Video: <input id="mv" type="file" accept="video/*"></p>
     <button id="msave" onclick="saveMovie()">Saqlash</button><div class="bar"><i id="mbar"></i></div></div>
     <div class="panel tw"><table><tr><th></th><th>Nomi</th><th>Narx</th><th>Qism</th><th>👁</th><th></th></tr>
@@ -145,8 +178,8 @@ const tabs = {
   },
   async banners() {
     const l = await req('GET', '/banners');
-    out(`<h2>🖼 Reklama bannerlari</h2><div class="panel"><p>Rasm yoki video: <input id="bf" type="file" accept="image/*,video/*"></p><input id="bl" placeholder="Bosilganda ochiladigan havola (ixtiyoriy)">
-    <button onclick="addBanner()">Yuklash</button></div><div class="panel tw"><table>${l.map(b => `<tr><td>${b.kind === 'video' ? `<video src="/files/${b.file}" style="width:130px" muted></video>` : `<img src="/files/${b.file}" style="width:130px">`}</td><td>${esc(b.link)}</td>
+    out(`<h2>🖼 Reklama bannerlari</h2><div class="panel"><p>Rasm yoki video: <input id="bf" type="file" accept="image/*,video/*"></p><select id="bp"><option value="top">Tepada (aylanuvchi katta banner)</option><option value="inline">Bosh sahifa o'rtasida</option><option value="detail">Kino sahifasida</option></select><input id="bl" placeholder="Bosilganda ochiladigan havola (ixtiyoriy)">
+    <button onclick="addBanner()">Yuklash</button></div><div class="panel tw"><table>${l.map(b => `<tr><td>${b.kind === 'video' ? `<video src="/files/${b.file}" style="width:130px" muted></video>` : `<img src="/files/${b.file}" style="width:130px">`}</td><td>${esc(b.place || 'top')}<br><small>👁 ${b.views || 0} • 👆 ${b.clicks || 0}</small><br><small>${esc(b.link)}</small></td>
     <td style="white-space:nowrap"><button class="s" onclick="act('POST','/banners/${b.id}/toggle',null,'banners')">${b.active ? 'Yoqilgan' : "O'chirilgan"}</button> <button class="d" onclick="del('/banners/${b.id}','banners')">✕</button></td></tr>`).join('')}</table></div>`);
   },
   async users(q = '') {
@@ -187,7 +220,8 @@ const tabs = {
     const s = await req('GET', '/settings');
     out(`<h2>⚙️ Sozlamalar</h2><div class="panel">
     <label class="sw"><input type="checkbox" ${s.phone_required === '1' ? 'checked' : ''} onchange="setSet('phone_required',this.checked)"> Telefon raqami majburiy</label>
-    <label class="sw"><input type="checkbox" ${s.sub_required === '1' ? 'checked' : ''} onchange="setSet('sub_required',this.checked)"> Majburiy obuna yoqilgan</label></div>`);
+    <label class="sw"><input type="checkbox" ${s.sub_required === '1' ? 'checked' : ''} onchange="setSet('sub_required',this.checked)"> Majburiy obuna yoqilgan</label>
+    <label class="sw"><input type="checkbox" ${s.intro_on !== '0' ? 'checked' : ''} onchange="setSet('intro_on',this.checked)"> Har bir kino boshida intro video qo'yilsin</label></div>`);
   },
   acc() {
     out(`<h2>🔐 Hisob</h2><div class="panel" style="max-width:420px"><input id="ac" type="password" placeholder="Joriy parol"><input id="au" placeholder="Yangi login" value="${esc(ME.username)}" autocapitalize="none"><input id="ap" type="password" placeholder="Yangi parol (8+ belgi)">
@@ -208,20 +242,20 @@ async function saveMovie() {
   if (!$('#mt').value.trim()) return toast('Nomini yozing');
   const fd = new FormData();
   [['title', 'mt'], ['year', 'my'], ['category_id', 'mc'], ['type', 'mtype'], ['price', 'mp'], ['description', 'md']].forEach(([k, i]) => fd.append(k, $('#' + i).value));
-  fd.append('allow_download', $('#mdl').checked ? '1' : '0');
+  fd.append('allow_download', $('#mdl').checked ? '1' : '0'); fd.append('featured', $('#mft').checked ? '1' : '0');
   if ($('#mpo').files[0]) fd.append('poster', $('#mpo').files[0]);
   const vid = $('#mv').files[0], notify = $('#mnf').checked;
   $('#msave').disabled = true;
   try {
     const r = await upload('/movies', fd);
-    if (vid) await chunkUpload(vid, r.id, $('#mn').value, { first: true, notify }, p => $('#mbar').style.width = p + '%');
+    if (vid) await uploadVideo(vid, r.id, $('#mn').value, { first: true, notify }, p => $('#mbar').style.width = p + '%');
     toast('✅ Saqlandi'); go('movies');
   } catch (e) { toast('Yuklashda xato'); $('#msave').disabled = false; }
 }
 function addEp(id) {
   const n = prompt('Qism raqami?'); if (!n) return;
   const i = document.createElement('input'); i.type = 'file'; i.accept = 'video/*';
-  i.onchange = async () => { toast('Yuklanmoqda...'); try { await chunkUpload(i.files[0], id, n, {}, p => toast('Yuklanmoqda ' + p + '%')); toast("✅ Qism qo'shildi"); go('movies'); } catch (e) { toast('Xato'); } };
+  i.onchange = async () => { toast('Yuklanmoqda...'); try { await uploadVideo(i.files[0], id, n, {}, p => toast('Yuklanmoqda ' + p + '%')); toast("✅ Qism qo'shildi"); go('movies'); } catch (e) { toast('Xato'); } };
   i.click();
 }
 async function showEps(id) {
@@ -234,20 +268,20 @@ async function editMovie(id) {
   const m = list.find(x => x.id === id); if (!m) return;
   modal(`<h3 style="margin-top:0">✏️ Tahrirlash</h3><input id="et" value="${esc(m.title)}"><div class="row"><input id="ey" type="number" value="${m.year || ''}" placeholder="Yili"><input id="ep" type="number" value="${m.price}" placeholder="Narxi"></div>
   <select id="ec"><option value="">Kategoriya</option>${cats.map(c => `<option value="${c.id}" ${c.id === m.category_id ? 'selected' : ''}>${esc(c.name)}</option>`).join('')}</select>
-  <textarea id="ed" rows="4">${esc(m.description)}</textarea><label><input type="checkbox" id="edl" ${m.allow_download ? 'checked' : ''}>Yuklab olish mumkin</label><p>🖼 Yangi poster: <input id="epo" type="file" accept="image/*"></p>
+  <textarea id="ed" rows="4">${esc(m.description)}</textarea><label><input type="checkbox" id="edl" ${m.allow_download ? 'checked' : ''}>Yuklab olish mumkin</label><br><label><input type="checkbox" id="eft" ${m.featured ? 'checked' : ''}>Bosh sahifada katta (hero)</label><p>🖼 Yangi poster: <input id="epo" type="file" accept="image/*"></p>
   <button onclick="saveEdit(${id})">Saqlash</button> <button class="s" onclick="closeModal()">Bekor</button>`);
 }
 async function saveEdit(id) {
   const fd = new FormData();
   fd.append('title', $('#et').value); fd.append('year', $('#ey').value); fd.append('price', $('#ep').value); fd.append('category_id', $('#ec').value);
-  fd.append('description', $('#ed').value); fd.append('allow_download', $('#edl').checked ? '1' : '0');
+  fd.append('description', $('#ed').value); fd.append('allow_download', $('#edl').checked ? '1' : '0'); fd.append('featured', $('#eft').checked ? '1' : '0');
   if ($('#epo').files[0]) fd.append('poster', $('#epo').files[0]);
   const r = await fetch(B + '/api/movies/' + id, { method: 'PUT', body: fd });
   if (!r.ok) return toast('Xato'); closeModal(); toast('✅ Saqlandi'); go('movies');
 }
 async function addBanner() {
   const f = $('#bf').files[0]; if (!f) return toast('Fayl tanlang');
-  const fd = new FormData(); fd.append('file', f); fd.append('link', $('#bl').value);
+  const fd = new FormData(); fd.append('file', f); fd.append('link', $('#bl').value); fd.append('place', $('#bp').value);
   toast('Yuklanmoqda...'); try { await upload('/banners', fd, p => toast('Yuklanmoqda ' + p + '%')); go('banners'); } catch (e) { toast('Xato'); }
 }
 async function chAcc() {
